@@ -1,0 +1,235 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <title>语音对话助手</title>
+    <style>
+        body { max-width: 800px; margin: 0 auto; padding: 20px; font-family: Arial, sans-serif; }
+        #chat-history { height: 400px; border: 1px solid #ccc; border-radius: 5px; padding: 10px; overflow-y: auto; margin-bottom: 20px; }
+        .message { margin: 10px 0; padding: 8px 12px; border-radius: 8px; max-width: 70%; }
+        .user-message { background-color: #e3f2fd; margin-left: auto; }
+        .bot-message { background-color: #f5f5f5; margin-right: auto; }
+        .error-message { color: red; }
+        #input-area { display: flex; gap: 10px; }
+        #text-input { flex: 1; padding: 8px; border: 1px solid #ccc; border-radius: 5px; }
+        button { padding: 8px 16px; background-color: #2196f3; color: white; border: none; border-radius: 5px; cursor: pointer; }
+        button:hover { background-color: #0b7dda; }
+        #audio-controls { margin-top: 10px; }
+        .audio-player-container { margin: 5px 0 15px 0; }
+        .controls { margin-top: 10px; display: flex; gap: 10px; align-items: center; }
+        .tts-controls { margin-left: auto; }
+    </style>
+</head>
+<body>
+    <h1>语音对话助手</h1>
+    <div id="chat-history"></div>
+    <div class="controls">
+        <div id="input-area">
+            <input type="text" id="text-input" placeholder="输入文字...">
+            <button onclick="sendText()">发送</button>
+        </div>
+        <div class="tts-controls">
+            <label>
+                <input type="checkbox" id="auto-read" checked> 自动朗读回复
+            </label>
+        </div>
+    </div>
+    <div id="audio-controls">
+        <button onclick="startRecording()" id="record-btn">开始录音</button>
+        <button onclick="stopRecording()" id="stop-btn" disabled>停止录音</button>
+    </div>
+
+    <script>
+        let mediaRecorder;
+        let audioChunks = [];
+        let stream;
+        let currentAudio = null;
+        
+        // 停止当前播放的音频
+        function stopCurrentAudio() {
+            if (currentAudio) {
+                currentAudio.pause();
+                currentAudio = null;
+            }
+        }
+        
+        function updateChatHistory(role, content, audioUrl = null, isError = false) {
+            const historyDiv = document.getElementById('chat-history');
+            const messageDiv = document.createElement('div');
+            messageDiv.className = `message ${role}-message ${isError ? 'error-message' : ''}`;
+            messageDiv.textContent = content;
+            
+            // 如果有音频URL，添加音频播放器
+            // 替换原音频创建代码
+        if (audioUrl && role === 'bot') {
+            const audioContainer = document.createElement('div');
+            audioContainer.className = 'audio-player-container';
+            
+            const audioPlayer = new Audio();
+            audioPlayer.controls = true;
+            audioPlayer.src = audioUrl;
+            audioPlayer.type = 'audio/wav';  // 明确指定MIME类型
+            audioPlayer.dataset.message = content;
+            
+            // 解决自动播放限制
+            audioPlayer.oncanplaythrough = function() {
+                if (document.getElementById('auto-read').checked) {
+                    try {
+                        audioPlayer.play();
+                    } catch (e) {
+                        console.log('需要用户交互才能播放音频');
+                        // 可以在这里添加提示用户点击播放的逻辑
+                    }
+                }
+            };
+            
+            audioContainer.appendChild(audioPlayer);
+            messageDiv.appendChild(audioContainer);
+        }
+                
+                // 如果自动朗读已开启，自动播放
+                if (document.getElementById('auto-read').checked) {
+                    setTimeout(() => {
+                        stopCurrentAudio();
+                        currentAudio = audioPlayer;
+                        audioPlayer.play().catch(e => {
+                            console.log('自动播放失败，可能需要用户交互:', e);
+                        });
+                    }, 500);
+                }
+            }
+            
+            historyDiv.appendChild(messageDiv);
+            historyDiv.scrollTop = historyDiv.scrollHeight;
+        }
+
+        async function sendText() {
+            const input = document.getElementById('text-input');
+            const text = input.value.trim();
+            if (!text) return;
+            
+            updateChatHistory('user', text);
+            input.value = '';
+            stopCurrentAudio();
+
+            try {
+                // 先获取聊天回复
+                const chatResponse = await fetch('/chat', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+                    body: `text=${encodeURIComponent(text)}`
+                });
+                
+                const chatData = await chatResponse.json();
+                if (chatData.error) {
+                    updateChatHistory('bot', `错误: ${chatData.error}`, null, true);
+                    return;
+                }
+                
+                // 再获取语音合成
+                const ttsResponse = await fetch('/tts', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+                    body: `text=${encodeURIComponent(chatData.response || '')}`
+                });
+                
+                if (ttsResponse.ok) {
+                    const audioBlob = await ttsResponse.blob();
+                    const audioUrl = URL.createObjectURL(audioBlob);
+                    updateChatHistory('bot', chatData.response || '未获取到回复', audioUrl);
+                } else {
+                    updateChatHistory('bot', chatData.response || '未获取到回复');
+                    updateChatHistory('bot', '语音合成失败', null, true);
+                }
+            } catch (error) {
+                console.error('发送消息失败:', error);
+                updateChatHistory('bot', '处理消息时出错，请重试', null, true);
+            }
+        }
+
+        async function startRecording() {
+            try {
+                stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+                mediaRecorder = new MediaRecorder(stream);
+                audioChunks = [];
+                
+                mediaRecorder.ondataavailable = (e) => {
+                    audioChunks.push(e.data);
+                };
+                
+                mediaRecorder.start();
+                document.getElementById('record-btn').disabled = true;
+                document.getElementById('stop-btn').disabled = false;
+                updateChatHistory('bot', '正在录音...');
+                stopCurrentAudio();
+            } catch (error) {
+                console.error('录音失败:', error);
+                updateChatHistory('bot', '录音启动失败，请检查麦克风权限', null, true);
+            }
+        }
+
+        async function stopRecording() {
+            if (mediaRecorder && mediaRecorder.state !== 'inactive') {
+                mediaRecorder.stop();
+                stream.getTracks().forEach(track => track.stop());
+                
+                document.getElementById('record-btn').disabled = false;
+                document.getElementById('stop-btn').disabled = true;
+                
+                mediaRecorder.onstop = async () => {
+                    const audioBlob = new Blob(audioChunks, { type: 'audio/wav' });
+                    const formData = new FormData();
+                    formData.append('file', audioBlob, 'recording.wav');
+
+                    try {
+                        // 语音识别
+                        const asrResponse = await fetch('/asr', {
+                            method: 'POST',
+                            body: formData
+                        });
+                        
+                        const asrData = await asrResponse.json();
+                        if (asrData.error) {
+                            updateChatHistory('bot', `识别错误: ${asrData.error}`, null, true);
+                            return;
+                        }
+                        updateChatHistory('user', asrData.text || '未识别到内容');
+
+                        // 获取聊天回复
+                        const chatResponse = await fetch('/chat', {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+                            body: `text=${encodeURIComponent(asrData.text || '')}`
+                        });
+                        
+                        const chatData = await chatResponse.json();
+                        if (chatData.error) {
+                            updateChatHistory('bot', `对话错误: ${chatData.error}`, null, true);
+                            return;
+                        }
+                        
+                        // 获取语音合成
+                        const ttsResponse = await fetch('/tts', {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+                            body: `text=${encodeURIComponent(chatData.response || '')}`
+                        });
+                        
+                        if (ttsResponse.ok) {
+                            const audioBlob = await ttsResponse.blob();
+                            const audioUrl = URL.createObjectURL(audioBlob);
+                            updateChatHistory('bot', chatData.response || '未获取到回复', audioUrl);
+                        } else {
+                            updateChatHistory('bot', chatData.response || '未获取到回复');
+                            updateChatHistory('bot', '语音合成失败', null, true);
+                        }
+                    } catch (error) {
+                        console.error('处理录音失败:', error);
+                        updateChatHistory('bot', '处理录音时出错', null, true);
+                    }
+                };
+            }
+        }
+    </script>
+</body>
+</html>
